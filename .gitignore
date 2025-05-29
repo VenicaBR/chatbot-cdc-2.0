@@ -1,0 +1,21 @@
+@"
+# Variáveis de ambiente
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Arquivos locais
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Logs
+*.log
+"@ | Out-File -FilePath .gitignore -Encoding UTF8
