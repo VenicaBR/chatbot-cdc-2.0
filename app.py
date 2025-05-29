@@ -8,34 +8,39 @@ from pathlib import Path
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 
-# Carrega variáveis do .env
+# Carrega variáveis do .env (apenas em desenvolvimento)
 load_dotenv()
 
-# CAMINHOS AUTOMÁTICOS - detecta a estrutura do projeto
-projeto_dir = Path(__file__).parent.parent  # Vai para a pasta raiz do projeto
-frontend_dir = projeto_dir / "Front_chatbot"
-faiss_dir = Path("C:/chatbot_cdc/faiss_index")
+# CONFIGURAÇÃO PARA PRODUÇÃO E DESENVOLVIMENTO
+if os.getenv('FLASK_ENV') == 'production':
+    # EM PRODUÇÃO - caminhos relativos
+    BASE_DIR = Path(__file__).parent
+    frontend_dir = BASE_DIR / "static"
+    faiss_dir = BASE_DIR / "faiss_index"
+    documentos_dir = BASE_DIR / "documentos"
+    
+    print("🌐 MODO PRODUÇÃO")
+    print(f"📁 Base: {BASE_DIR}")
+    print(f"🎨 Frontend: {frontend_dir}")
+    print(f"🗂️ FAISS: {faiss_dir}")
+    
+else:
+    # EM DESENVOLVIMENTO - caminhos relativos à pasta atual
+    BASE_DIR = Path(__file__).parent
+    frontend_dir = BASE_DIR / "static"
+    faiss_dir = Path("C:/chatbot_cdc/faiss_index")
+    documentos_dir = BASE_DIR / "documentos"
+    
+    print("🔧 MODO DESENVOLVIMENTO")
+    print(f"📁 Base: {BASE_DIR}")
+    print(f"🎨 Frontend: {frontend_dir}")
+    print(f"🗂️ FAISS: {faiss_dir}")
 
-# Tenta encontrar a pasta frontend com diferentes nomes
-possible_frontend_dirs = [
-    projeto_dir / "Front_chatbot",
-    projeto_dir / "frontend", 
-    projeto_dir / "Front",
-    projeto_dir / "web"
-]
-
-for possible_dir in possible_frontend_dirs:
-    if possible_dir.exists() and (possible_dir / "index.html").exists():
-        frontend_dir = possible_dir
-        break
-
-print("Configurações:")
-print(f"  Projeto: {projeto_dir}")
-print(f"  Frontend: {frontend_dir}")
-print(f"  FAISS: {faiss_dir}")
-print(f"  Frontend existe: {frontend_dir.exists()}")
-print(f"  index.html existe: {(frontend_dir / 'index.html').exists()}")
-print(f"  FAISS existe: {faiss_dir.exists()}")
+print("✅ CONFIGURAÇÕES FINAIS:")
+print(f"🎨 Frontend: {frontend_dir} ({'✅' if frontend_dir.exists() else '❌'})")
+print(f"📄 index.html: {'✅' if (frontend_dir / 'index.html').exists() else '❌'}")
+print(f"🗂️ FAISS: {faiss_dir} ({'✅' if faiss_dir.exists() else '❌'})")
+print(f"📚 Documentos: {documentos_dir} ({'✅' if documentos_dir.exists() else '❌'})")
 
 app = Flask(__name__, static_folder=str(frontend_dir), static_url_path='')
 CORS(app)
@@ -44,29 +49,63 @@ CORS(app)
 api_key = os.getenv("OPENAI_API_KEY")
 if not api_key:
     print("❌ OPENAI_API_KEY não encontrada!")
-    exit(1)
+    print("Configure a variável de ambiente")
+    if os.getenv('FLASK_ENV') != 'production':
+        exit(1)
 
-client = openai.OpenAI(api_key=api_key)
-embedding = OpenAIEmbeddings(openai_api_key=api_key)
+client = openai.OpenAI(api_key=api_key) if api_key else None
+embedding = OpenAIEmbeddings(openai_api_key=api_key) if api_key else None
 
-# Carrega índice FAISS
+# Carrega ou cria índice FAISS
 db = None
 try:
-    if faiss_dir.exists():
-        print("Carregando índice FAISS...")
+    if faiss_dir.exists() and list(faiss_dir.glob("*.faiss")):
+        print("📖 Carregando índice FAISS existente...")
         db = FAISS.load_local(
             folder_path=str(faiss_dir),
             embeddings=embedding,
             allow_dangerous_deserialization=True
         )
         print("✅ Índice FAISS carregado!")
+    
+    elif os.getenv('FLASK_ENV') == 'production':
+        print("🔄 Criando índice FAISS em produção...")
+        
+        # Em produção, cria o índice na inicialização
+        from langchain_community.document_loaders import DirectoryLoader, PyPDFLoader
+        from langchain.text_splitter import RecursiveCharacterTextSplitter
+        
+        if documentos_dir.exists():
+            loader = DirectoryLoader(
+                str(documentos_dir), 
+                glob="*.pdf",
+                loader_cls=PyPDFLoader
+            )
+            docs = loader.load()
+            
+            if docs:
+                text_splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=1000,
+                    chunk_overlap=200,
+                )
+                chunks = text_splitter.split_documents(docs)
+                
+                db = FAISS.from_documents(chunks, embedding)
+                
+                # Salva o índice
+                faiss_dir.mkdir(parents=True, exist_ok=True)
+                db.save_local(str(faiss_dir))
+                print(f"✅ Índice criado com {len(chunks)} chunks")
+            else:
+                print("❌ Nenhum documento encontrado")
+        else:
+            print("❌ Pasta de documentos não encontrada")
+    
     else:
-        print(f"❌ Diretório FAISS não encontrado: {faiss_dir}")
-        print("Execute build_index_alternativo.py primeiro")
+        print("⚠️ Índice FAISS não encontrado - execute build_index.py primeiro")
         
 except Exception as e:
-    print(f"❌ Erro ao carregar FAISS: {e}")
-    print("Execute build_index_alternativo.py primeiro")
+    print(f"❌ Erro ao carregar/criar FAISS: {e}")
 
 @app.route('/')
 def home():
@@ -74,8 +113,9 @@ def home():
         return send_from_directory(app.static_folder, 'index.html')
     except FileNotFoundError:
         return jsonify({
-            "erro": "index.html não encontrado",
-            "frontend_path": str(frontend_dir)
+            "erro": "Frontend não encontrado",
+            "frontend_path": str(frontend_dir),
+            "arquivos_disponiveis": [f.name for f in frontend_dir.glob("*")] if frontend_dir.exists() else []
         }), 404
 
 @app.route('/<path:path>')
@@ -87,9 +127,9 @@ def static_files(path):
 
 @app.route('/perguntar', methods=['POST'])
 def perguntar():
-    if db is None:
+    if not client or not db:
         return jsonify({
-            "resposta": "❌ Sistema não inicializado. Execute build_index_alternativo.py primeiro.",
+            "resposta": "❌ Sistema não inicializado. Verifique configurações.",
             "sugestoes": []
         })
     
@@ -102,7 +142,7 @@ def perguntar():
             })
 
         pergunta = data.get('pergunta')
-        print(f"Pergunta recebida: {pergunta}")
+        print(f"📝 Pergunta: {pergunta}")
 
         # Busca documentos similares
         docs_encontrados = db.similarity_search(pergunta, k=4)
@@ -114,7 +154,7 @@ def perguntar():
                 "sugestoes": [
                     "Tente reformular a pergunta",
                     "Use termos mais específicos do Direito do Consumidor",
-                    "Consulte sobre CDC, garantia, vício do produto, etc."
+                    "Pergunte sobre CDC, garantia, vício do produto, etc."
                 ]
             })
 
@@ -141,13 +181,14 @@ def perguntar():
             max_tokens=600
         ).choices[0].message.content.strip()
 
+        print(f"✅ Resposta gerada")
         return jsonify({
             "resposta": resposta,
             "sugestoes": []
         })
 
     except Exception as e:
-        print(f"Erro ao processar pergunta: {e}")
+        print(f"❌ Erro: {e}")
         return jsonify({
             "resposta": "Erro interno. Tente novamente.",
             "sugestoes": []
@@ -155,30 +196,43 @@ def perguntar():
 
 @app.route('/status', methods=['GET'])
 def status():
-    # Converte WindowsPath para string para evitar erro de serialização JSON
     arquivos_faiss = []
     if faiss_dir.exists():
         arquivos_faiss = [str(arquivo.name) for arquivo in faiss_dir.glob("*")]
     
     return jsonify({
         "status": "online",
+        "ambiente": os.getenv('FLASK_ENV', 'development'),
         "faiss_carregado": db is not None,
-        "openai_configurado": bool(os.getenv("OPENAI_API_KEY")),
+        "openai_configurado": bool(api_key),
         "frontend_path": str(frontend_dir),
         "faiss_path": str(faiss_dir),
-        "arquivos_faiss": arquivos_faiss
+        "arquivos_faiss": arquivos_faiss,
+        "frontend_existe": frontend_dir.exists(),
+        "index_html_existe": (frontend_dir / 'index.html').exists()
+    })
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Endpoint para monitoramento de saúde"""
+    return jsonify({
+        "status": "healthy",
+        "timestamp": str(Path(__file__).stat().st_mtime)
     })
 
 if __name__ == '__main__':
-    print("\n" + "="*50)
-    print("🚀 INICIANDO CHATBOT CDC")
-    print(f"📁 Frontend: {frontend_dir}")
-    print(f"🗂️  FAISS: {faiss_dir}")
-    print(f"🤖 IA: {'✅' if db else '❌'}")
-    print("🌐 Acesse: http://localhost:8000")
-    print("📊 Status: http://localhost:8000/status")
-    print("="*50)
+    port = int(os.environ.get('PORT', 8000))
+    debug = os.getenv('FLASK_ENV') != 'production'
     
-    app.run(host='0.0.0.0', port=8000, debug=True)
-
-
+    print("\n" + "="*60)
+    print("🚀 INICIANDO CHATBOT CDC")
+    print(f"🌐 Ambiente: {'PRODUÇÃO' if not debug else 'DESENVOLVIMENTO'}")
+    print(f"🎨 Frontend: {frontend_dir}")
+    print(f"🗂️ FAISS: {faiss_dir}")
+    print(f"🤖 IA: {'✅' if db else '❌'}")
+    print(f"🔑 OpenAI: {'✅' if api_key else '❌'}")
+    print(f"🌐 Porta: {port}")
+    print(f"🔍 Debug: {debug}")
+    print("="*60)
+    
+    app.run(host='0.0.0.0', port=port, debug=debug)
